@@ -260,3 +260,86 @@ async def test_timeout_raises_timeout_error():
 
     with pytest.raises(TimeoutError):
         await get_health()
+
+
+# ---------------------------------------------------------------------------
+# Bearer auth middleware tests
+# ---------------------------------------------------------------------------
+
+
+def test_bearer_auth_middleware_allows_valid_token():
+    """_BearerAuthMiddleware passes through requests with a valid token."""
+    import asyncio
+    from nats_mcp.server import _BearerAuthMiddleware
+
+    called = []
+
+    async def fake_app(scope, receive, send):
+        called.append(True)
+
+    middleware = _BearerAuthMiddleware(fake_app, token="secret-token")
+
+    async def run():
+        scope = {
+            "type": "http",
+            "headers": [(b"authorization", b"Bearer secret-token")],
+            "method": "POST",
+            "path": "/mcp",
+            "query_string": b"",
+        }
+        await middleware(scope, None, lambda *a: None)
+
+    asyncio.run(run())
+    assert called, "Request with valid token should be passed through"
+
+
+def test_bearer_auth_middleware_rejects_missing_token():
+    """_BearerAuthMiddleware returns 401 when Authorization header is absent."""
+    import asyncio
+    from nats_mcp.server import _BearerAuthMiddleware
+
+    responses = []
+
+    async def fake_app(scope, receive, send):
+        responses.append("app_called")
+
+    async def capture_send(message):
+        responses.append(message)
+
+    middleware = _BearerAuthMiddleware(fake_app, token="secret-token")
+
+    async def run():
+        scope = {
+            "type": "http",
+            "headers": [],
+            "method": "POST",
+            "path": "/mcp",
+            "query_string": b"",
+        }
+        await middleware(scope, None, capture_send)
+
+    asyncio.run(run())
+    assert "app_called" not in responses
+    status_response = next((r for r in responses if r.get("type") == "http.response.start"), None)
+    assert status_response is not None
+    assert status_response["status"] == 401
+
+
+def test_bearer_auth_middleware_passes_non_http_scope():
+    """_BearerAuthMiddleware passes through non-HTTP (lifespan) scopes."""
+    import asyncio
+    from nats_mcp.server import _BearerAuthMiddleware
+
+    called = []
+
+    async def fake_app(scope, receive, send):
+        called.append(scope["type"])
+
+    middleware = _BearerAuthMiddleware(fake_app, token="secret-token")
+
+    async def run():
+        scope = {"type": "lifespan"}
+        await middleware(scope, None, None)
+
+    asyncio.run(run())
+    assert called == ["lifespan"]
