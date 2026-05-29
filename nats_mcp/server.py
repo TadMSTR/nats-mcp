@@ -237,7 +237,7 @@ def main() -> None:
             _log.info("nats_mcp_bearer_auth_enabled")
             middleware = [Middleware(_BearerAuthMiddleware, token=api_token)]
         else:
-            _log.info("nats_mcp_bearer_auth_disabled", reason="NATS_MCP_API_TOKEN not set")
+            _log.warning("nats_mcp_bearer_auth_disabled", reason="NATS_MCP_API_TOKEN not set — HTTP transport running without authentication")
         mcp.run(transport="streamable-http", host="127.0.0.1", port=port, middleware=middleware or None)
     else:
         mcp.run()  # stdio — current default mode
