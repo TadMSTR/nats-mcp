@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **HTTP transport mode** — opt-in via `NATS_MCP_PORT` env var. Runs streamable-http
+  on `127.0.0.1:<port>` instead of stdio. Bearer token auth (`NATS_MCP_API_TOKEN`)
+  available in HTTP mode using `hmac.compare_digest()`. Logs warning when HTTP mode
+  runs without a token configured.
+
 ## [0.1.1] — 2026-05-27
 
 ### Added

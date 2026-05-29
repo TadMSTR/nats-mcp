@@ -16,11 +16,17 @@ Configuration:
 
 from __future__ import annotations
 
+import hmac
 import os
+from typing import Any
 
 import httpx
 import structlog
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
+from starlette.requests import Request
+from starlette.responses import Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 _log = structlog.get_logger("nats-mcp")
 
@@ -188,10 +194,53 @@ async def get_health() -> dict:
     return await _get("/healthz")
 
 
+class _BearerAuthMiddleware:
+    """ASGI middleware that enforces static bearer token authentication.
+
+    Only active when NATS_MCP_API_TOKEN is set in the environment.
+    Requests missing a valid Authorization header receive a 401 response.
+    Non-HTTP scopes (lifespan, websocket) are passed through unconditionally.
+    """
+
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self._app = app
+        self._token = token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            request = Request(scope, receive)
+            auth_header = request.headers.get("authorization", "")
+            provided = auth_header.removeprefix("Bearer ") if auth_header.lower().startswith("bearer ") else ""
+            if not hmac.compare_digest(provided, self._token):
+                response = Response(
+                    content='{"error":"Unauthorized"}',
+                    status_code=401,
+                    media_type="application/json",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+                await response(scope, receive, send)
+                return
+        await self._app(scope, receive, send)
+
+
 def main() -> None:
     from .observability import configure_logging
     configure_logging()
-    mcp.run()
+    # Transport: stdio (default) or streamable-http when NATS_MCP_PORT is set.
+    # Bearer auth (NATS_MCP_API_TOKEN) only applies to HTTP transport.
+    port_env = os.environ.get("NATS_MCP_PORT")
+    if port_env:
+        port = int(port_env)
+        api_token = os.environ.get("NATS_MCP_API_TOKEN")
+        middleware: list[Any] = []
+        if api_token:
+            _log.info("nats_mcp_bearer_auth_enabled")
+            middleware = [Middleware(_BearerAuthMiddleware, token=api_token)]
+        else:
+            _log.warning("nats_mcp_bearer_auth_disabled", reason="NATS_MCP_API_TOKEN not set — HTTP transport running without authentication")
+        mcp.run(transport="streamable-http", host="127.0.0.1", port=port, middleware=middleware or None)
+    else:
+        mcp.run()  # stdio — current default mode
 
 
 if __name__ == "__main__":
