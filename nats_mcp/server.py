@@ -16,6 +16,7 @@ Configuration:
 
 from __future__ import annotations
 
+import hmac
 import os
 from typing import Any
 
@@ -210,7 +211,7 @@ class _BearerAuthMiddleware:
             request = Request(scope, receive)
             auth_header = request.headers.get("authorization", "")
             provided = auth_header.removeprefix("Bearer ") if auth_header.lower().startswith("bearer ") else ""
-            if provided != self._token:
+            if not hmac.compare_digest(provided, self._token):
                 response = Response(
                     content='{"error":"Unauthorized"}',
                     status_code=401,
