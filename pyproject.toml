@@ -48,6 +48,13 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["B", "SIM"]
 
+[tool.coverage.run]
+source = ["nats_mcp"]
+# observability.py (OTEL/structlog setup) and __main__ are boilerplate/entry-point code —
+# excluded from the unit-coverage gate; they need a live-transport harness for low value
+# (same rationale as scoped-mcp's serve-loop exclusion).
+omit = ["tests/*", "nats_mcp/__main__.py", "nats_mcp/observability.py"]
+
 [tool.coverage.report]
 fail_under = 80
 show_missing = true

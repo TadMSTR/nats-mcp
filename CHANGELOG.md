@@ -4,6 +4,10 @@
 
 ### Added
 
+- Standard CI workflow (`ci.yml`) — ruff (pinned `ruff==0.16.0`) + pytest + pip-audit + build.
+- Release workflow (`release.yml`) — a `vX.Y.Z` tag cuts a source-only GitHub Release.
+- Coverage config: exclude `observability.py` and `__main__.py` (boilerplate/entry-point)
+  from the 80% gate so it measures real logic (`server.py`, 84%).
 - **HTTP transport mode** — opt-in via `NATS_MCP_PORT` env var. Runs streamable-http
   on `127.0.0.1:<port>` instead of stdio. Bearer token auth (`NATS_MCP_API_TOKEN`)
   available in HTTP mode using `hmac.compare_digest()`. Logs warning when HTTP mode

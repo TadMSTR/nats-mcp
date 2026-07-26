@@ -270,6 +270,7 @@ async def test_timeout_raises_timeout_error():
 def test_bearer_auth_middleware_allows_valid_token():
     """_BearerAuthMiddleware passes through requests with a valid token."""
     import asyncio
+
     from nats_mcp.server import _BearerAuthMiddleware
 
     called = []
@@ -296,6 +297,7 @@ def test_bearer_auth_middleware_allows_valid_token():
 def test_bearer_auth_middleware_rejects_missing_token():
     """_BearerAuthMiddleware returns 401 when Authorization header is absent."""
     import asyncio
+
     from nats_mcp.server import _BearerAuthMiddleware
 
     responses = []
@@ -328,6 +330,7 @@ def test_bearer_auth_middleware_rejects_missing_token():
 def test_bearer_auth_middleware_passes_non_http_scope():
     """_BearerAuthMiddleware passes through non-HTTP (lifespan) scopes."""
     import asyncio
+
     from nats_mcp.server import _BearerAuthMiddleware
 
     called = []
