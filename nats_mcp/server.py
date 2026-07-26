@@ -210,7 +210,11 @@ class _BearerAuthMiddleware:
         if scope["type"] == "http":
             request = Request(scope, receive)
             auth_header = request.headers.get("authorization", "")
-            provided = auth_header.removeprefix("Bearer ") if auth_header.lower().startswith("bearer ") else ""
+            provided = (
+                auth_header.removeprefix("Bearer ")
+                if auth_header.lower().startswith("bearer ")
+                else ""
+            )
             if not hmac.compare_digest(provided, self._token):
                 response = Response(
                     content='{"error":"Unauthorized"}',
@@ -225,6 +229,7 @@ class _BearerAuthMiddleware:
 
 def main() -> None:
     from .observability import configure_logging
+
     configure_logging()
     # Transport: stdio (default) or streamable-http when NATS_MCP_PORT is set.
     # Bearer auth (NATS_MCP_API_TOKEN) only applies to HTTP transport.
@@ -237,8 +242,13 @@ def main() -> None:
             _log.info("nats_mcp_bearer_auth_enabled")
             middleware = [Middleware(_BearerAuthMiddleware, token=api_token)]
         else:
-            _log.warning("nats_mcp_bearer_auth_disabled", reason="NATS_MCP_API_TOKEN not set — HTTP transport running without authentication")
-        mcp.run(transport="streamable-http", host="127.0.0.1", port=port, middleware=middleware or None)
+            _log.warning(
+                "nats_mcp_bearer_auth_disabled",
+                reason="NATS_MCP_API_TOKEN not set — HTTP transport running without authentication",
+            )
+        mcp.run(
+            transport="streamable-http", host="127.0.0.1", port=port, middleware=middleware or None
+        )
     else:
         mcp.run()  # stdio — current default mode
 
