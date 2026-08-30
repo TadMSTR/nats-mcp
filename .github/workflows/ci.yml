@@ -127,8 +127,11 @@ jobs:
       - name: Smoke test — the baked non-loopback opt-in is load-bearing
         run: |
           set +e
+          # Generated, not a literal: a hardcoded hex string here is indistinguishable
+          # from a real credential to a secret scanner, and a repo carrying a permanent
+          # "expected" gitleaks hit teaches people to skip the output.
           out=$(docker run --rm -e NATS_MCP_ALLOW_NONLOOPBACK= \
-            -e NATS_MCP_API_TOKEN=0123456789abcdef0123456789abcdef nats-mcp:ci 2>&1)
+            -e NATS_MCP_API_TOKEN="$(openssl rand -hex 16)" nats-mcp:ci 2>&1)
           status=$?
           echo "$out"
           if [ $status -eq 0 ]; then
@@ -144,7 +147,7 @@ jobs:
           # liveness, not readiness. If this step ever needs a NATS service to pass, the
           # probe has started reaching upstream and the restart-loop risk is back.
           docker run -d --name nats-mcp-ci -p 127.0.0.1:8508:8508 \
-            -e NATS_MCP_API_TOKEN=0123456789abcdef0123456789abcdef nats-mcp:ci
+            -e NATS_MCP_API_TOKEN="$(openssl rand -hex 16)" nats-mcp:ci
           for i in $(seq 1 30); do
             [ "$(docker inspect --format '{{.State.Health.Status}}' nats-mcp-ci)" = "healthy" ] && break
             sleep 2

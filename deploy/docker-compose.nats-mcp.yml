@@ -73,11 +73,33 @@ services:
     # With no app-side file handler, this block IS the log rotation mechanism.
     # The `nats` stack carries none today — worth adding one to the `nats` service
     # at the same time.
+    # Measured, not guessed: 71.75 MiB peak and 0.12% CPU across 200 concurrent tool
+    # calls against the live NATS server, so this is roughly 3.5x headroom. Verified
+    # the container still runs healthy under exactly these limits.
+    mem_limit: 256m
+    cpus: "0.5"
     logging:
       driver: "json-file"
       options:
         max-size: "5m"
         max-file: "2"
+    # forge-net membership is a DELIBERATE, NARROW-PURPOSE choice — security pattern
+    # NE-02, recurrence 9. Recorded here because the tradeoff is invisible from the
+    # one line below.
+    #
+    # It is needed OUTBOUND only, to resolve `nats:8222`. Nothing reaches nats-mcp
+    # inbound by container name: every scoped-mcp instance is a PM2 fork on the host
+    # and addresses its HTTP MCP backends as localhost:<port> — all 12 of them, with
+    # no container-name consumer anywhere. So this attaches to a 57-container bridge
+    # in order to talk to exactly one of them, and the mandatory bearer token is the
+    # single control standing between the other 56 and a tool surface returning client
+    # IPs and authorized_user identities.
+    #
+    # The narrower alternative is a dedicated network joining only `nats` and
+    # `nats-mcp`, with nats-mcp off forge-net entirely and still consumed over the
+    # loopback publish above. Weighed and declined for v0.3.0 (Ted, 2026-08-30): it
+    # grows the merge into the running `nats` service. If nats-mcp ever gains a
+    # container-side consumer, revisit this before adding one.
     networks:
       - forge-net
 
