@@ -1,39 +1,59 @@
 ---
 owner: TadMSTR
 github-account: personal
-last-updated: 2026-05-27
+last-updated: 2026-08-30
 ---
 
 # nats-mcp — Agent Instructions
 
 ## Purpose
 
-FastMCP Python MCP server wrapping the NATS HTTP monitoring API with 5 read-only tools.
-Gives agents direct visibility into NATS server health, connections, subscriptions,
-JetStream status, and overall health — without direct NATS client access.
-Deployed on forge as a PM2 process wired into the sysadmin agent's scoped-mcp config.
+FastMCP Python MCP server wrapping the NATS HTTP monitoring API with 8 read-only tools.
+Gives agents direct visibility into NATS server health, client connections, subscriptions,
+JetStream streams and consumers — without direct NATS client access.
+
+**Not deployed.** This server appears in no agent manifest and has no PM2 app. The target
+is a container in the `nats` Docker stack (vikunja#496); `ecosystem.config.js` documents
+the PM2 install path and still works, but nothing on forge runs it today. From
+2026-05-27 to 2026-08-30 this section asserted the opposite — a live PM2 deployment wired
+into an agent's scoped-mcp config — which was never true at any point. Verified against
+`/etc/forge/manifests/*.yml`, `~/.claude/manifests/` and the PM2 process list on
+2026-08-30. Re-check before restating a deployment status here.
 
 ## Structure
 
 ```
 nats_mcp/
-  __init__.py     Package marker
-  __main__.py     python -m nats_mcp entry point
-  server.py       FastMCP server — all 5 tools
+  __init__.py         Package marker
+  __main__.py         python -m nats_mcp entry point
+  server.py           FastMCP server — all 8 tools, bearer-auth middleware, main()
+  observability.py    structlog stdout logging + opt-in OTEL traces and metrics
+  exceptions.py       NatsMcpError hierarchy
 tests/
   __init__.py
-  test_server.py  pytest + respx tests for all tools
-ecosystem.config.js   PM2 stdio process config
-pyproject.toml        Package metadata, deps, ruff + pytest config
+  test_server.py         pytest + respx tests for all tools and main()
+  test_observability.py  log sinks, OTEL gating, instrument()
+ecosystem.config.js   PM2 stdio process config (install path, not currently running)
+pyproject.toml        Package metadata, deps, ruff + pytest + coverage config
+LICENSE               MIT
 ```
 
 ## Invariants
 
 - All MCP tools are read-only — monitoring endpoints only, never the NATS client port.
-- No authentication required — NATS monitoring port 8222 is open without credentials on forge.
-- `limit` parameter in `get_connections` is integer-typed and clamped, never string-interpolated into URLs.
+- No authentication required — NATS monitoring port 8222 is open without credentials on forge,
+  and is bound loopback-only. (`varz.http_host` reads `0.0.0.0`; that is the in-container
+  bind, not the published binding. Do not "fix" it.)
+- `limit` in `get_connections` is integer-typed and clamped; `state` is validated against
+  `{open, closed, all}` before the request is issued. Nothing caller-supplied is
+  string-interpolated into a URL.
 - Response sizes are capped before returning to the MCP caller.
-- No shell exec, subprocess calls, or filesystem writes.
+- No shell exec, subprocess calls, or filesystem writes. A log file is written only when
+  `LOG_FILE` is explicitly set.
+- `get_connections` discloses client IP addresses and `authorized_user` (an agent identity)
+  to any caller holding the tool grant. That is deliberate — it is what makes an
+  authorization-violation burst attributable — and it is why the containerised deploy's
+  bearer token is mandatory, not optional.
 
 ## Dependencies
 
@@ -42,18 +62,34 @@ pyproject.toml        Package metadata, deps, ruff + pytest config
 | `fastmcp` | MCP server framework |
 | `httpx` | Async HTTP client for NATS monitoring API calls |
 | `structlog` | Structured JSON logging |
+| `opentelemetry-sdk` + `-exporter-otlp-proto-grpc` | Optional (`[otel]` extra) — traces and metrics |
 
 ## Configuration
 
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `NATS_MONITOR_URL` | `http://localhost:8222` | NATS HTTP monitoring base URL |
+| `NATS_MCP_PORT` | (unset) | Set → streamable-http transport. Unset → stdio |
+| `NATS_MCP_HOST` | `127.0.0.1` | HTTP bind address; `0.0.0.0` in a container |
+| `NATS_MCP_API_TOKEN` | (unset) | Bearer token, HTTP transport only |
+| `LOG_LEVEL` | `INFO` | structlog level |
+| `LOG_FILE` | (unset) | Extra file sink; unset = stdout only |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | OTLP gRPC endpoint — port 4317, not 4318 |
 
-No secrets required.
+`NATS_MCP_API_TOKEN` is the only secret. It is never logged; the bearer comparison
+uses `hmac.compare_digest()`.
 
 ## Extension points
 
-- **Add new tools:** `nats_mcp/server.py` — follow existing `@mcp.tool()` pattern; add corresponding tests
+- **Add new tools:** `nats_mcp/server.py` — follow the existing pattern, which is
+  `@mcp.tool()` above `@instrument("<tool_name>")` above the function. Both decorators,
+  in that order. Add corresponding tests.
+- **Query parameters NATS omits silently:** two monitoring endpoints drop fields unless
+  asked. `/connz` omits `authorized_user` without `auth=true`; `/jsz` omits the whole
+  `config` block — and therefore `subjects`, `retention`, `max_age`, `discard` — without
+  `config=1`. In both cases the response is a complete-looking 200 with the field simply
+  absent. Any new endpoint parameter of this kind needs a test asserting the *request*
+  carries it, not just that the response parses.
 - **Do not expose:** NATS client port (4222) — monitoring port (8222) only
 
 ## Out of scope for agents
@@ -71,12 +107,23 @@ No secrets required.
 ## Testing
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,otel]" ruff==0.16.0
 pytest
 pytest --cov=nats_mcp --cov-report=term-missing
 ```
 
-Tests use `respx` to mock the NATS HTTP API. No real network calls. Coverage threshold: 80%.
+Tests use `respx` to mock the NATS HTTP API. No real network calls. Coverage threshold: 80%
+over `server.py`, `observability.py` and `exceptions.py`; only `__main__.py` is omitted.
+
+Install the `otel` extra: the OTEL success-path tests `importorskip` without it, so a
+`[dev]`-only install silently skips them and under-reports what is covered. CI installs
+`.[dev,otel]`.
+
+Fixtures mirror what NATS 2.12.6 actually emits. `/connz` connection objects use
+`subscriptions`, `in_msgs` and `out_msgs` — **not** `num_subs`, `msgs_from`, `msgs_to`,
+which are not /connz fields at all. Fixtures that invent field names keep the suite green
+while the tool returns `None` against a live server; that is what happened here before
+v0.2.0.
 
 ## Git workflow
 

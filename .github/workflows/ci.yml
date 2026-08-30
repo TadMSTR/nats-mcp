@@ -23,7 +23,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install ".[dev]" ruff==0.16.0
+        # [otel] is not optional for CI. The OTEL success-path tests use
+        # importorskip, so a [dev]-only install SKIPS them silently and coverage
+        # reports green over code that was never executed — the exact shape of the
+        # dead get_tracer() this release fixed.
+        run: pip install ".[dev,otel]" ruff==0.16.0
 
       - name: Lint (ruff)
         run: ruff check .
@@ -32,7 +36,7 @@ jobs:
         run: ruff format --check .
 
       - name: Run tests
-        run: pytest --cov=nats_mcp
+        run: pytest --cov=nats_mcp --cov-report=term-missing
 
   audit:
     name: Dependency audit
