@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nats-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "FastMCP server for NATS messaging bus health via the HTTP monitoring API"
 readme = "README.md"
 license = "MIT"

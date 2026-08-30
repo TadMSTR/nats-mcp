@@ -2,6 +2,63 @@
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-30
+
+Containerisation. Produces a published image and the compose service fragment for
+forge's `nats` stack. **This release does not deploy anything** — sysadmin merges the
+fragment and deploys separately.
+
+### Added
+
+- **`Dockerfile`** — two-stage build on `python:3.13-slim`, pinned by multi-arch index
+  digest rather than tag. The runtime stage takes `/opt/venv` wholesale, so no pip,
+  setuptools or build metadata ships in the image. Non-root `1000:1000`, matching the
+  `nats` service in the same stack. Installs the `[otel]` extra deliberately: setting
+  `OTEL_EXPORTER_OTLP_ENDPOINT` without it does not fail loudly, it exports nothing.
+- **`GET /health`** — unauthenticated liveness route for the container `HEALTHCHECK`,
+  exempted from `_BearerAuthMiddleware` by **exact** path match. `/healthz`, `/health/`
+  and `/health-debug` still return 401. Body is the literal `{"status": "ok"}` and
+  carries no configuration, because an unauthenticated route echoes to every co-tenant
+  container on `forge-net`.
+
+  It does **not** probe NATS. Liveness, not readiness: a dependency check there would
+  let a NATS restart mark this container unhealthy and have Docker restart a process
+  that was working fine. Distinct from the `get_health` *tool*, which does query NATS.
+- **`HEALTHCHECK`** using the interpreter already in the image rather than curl or wget,
+  neither of which slim ships. It carries no bearer token — a healthcheck that did would
+  put the credential in every `docker inspect`.
+- **`deploy/docker-compose.nats-mcp.yml`** — the service block for `~/docker/nats/`.
+  A fragment, not a runnable stack. `read_only: true` with no `tmpfs` companion (stdout
+  logging means nothing is written), `cap_drop: ALL`, `no-new-privileges`, and a
+  loopback-only `127.0.0.1:8508:8508` publish. Verified as a running container, not
+  asserted on paper.
+- **`.dockerignore`** — excludes `deploy/` and the `Dockerfile` themselves; they
+  describe the build and the deploy target and do not belong in the artifact.
+- **`docker-build` job in `ci.yml`** — builds the image on every PR and smoke-tests it:
+  all three fail-closed guards refuse as expected, the container reaches `healthy` with
+  no NATS reachable anywhere (proving liveness is decoupled from readiness), `/health`
+  answers unauthenticated while `/healthz`, `/health/`, `/health-debug` and `/mcp` all
+  return 401, and the image runs as a non-root uid. Without this the Dockerfile is only
+  exercised at tag time, so a regression ships as a failed release rather than a failed PR.
+- **`publish-image` job in `release.yml`** — builds `linux/amd64,linux/arm64` and pushes
+  `ghcr.io/tadmstr/nats-mcp:<tag>` and `:latest`. Permissions are now scoped per job
+  (`permissions: {}` at workflow level) so the release job never holds `packages: write`
+  nor the publish job `contents: write`.
+
+### Notes
+
+- `NATS_MONITOR_URL` is deliberately **not** baked into the image. A `localhost` default
+  would point at the container's own loopback, where nothing listens — and the resulting
+  container starts, reports `healthy` and answers `/health` with 200 while every tool
+  fails. That exact state was reproduced as a negative control during this build; it is
+  the shape of vikunja#462. In the stack it must be `http://nats:8222`.
+- `NATS_MCP_API_TOKEN` is likewise never baked. `forge-net` is an external bridge shared
+  by most stacks on the host, so the token is the only control between a co-tenant
+  container and a tool surface returning client IPs and `authorized_user` identities.
+  The v0.2.0 fail-closed guard makes it mandatory rather than optional.
+- `NATS_MCP_HOST=0.0.0.0` and `NATS_MCP_ALLOW_NONLOOPBACK=1` **are** baked, and are not
+  redundant with each other — without the opt-in the process refuses to start at all.
+
 ## [0.2.0] — 2026-08-30
 
 First tagged release. `[0.1.0]` and `[0.1.1]` below describe work that was never

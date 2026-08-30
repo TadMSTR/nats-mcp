@@ -35,7 +35,7 @@ import structlog
 from fastmcp import FastMCP
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .exceptions import (
@@ -65,6 +65,12 @@ _CONNZ_STATES = frozenset({"open", "closed", "all"})
 # only access control the moment it moved into a container.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _MIN_API_TOKEN_LENGTH = 16
+
+# The only paths that answer without a bearer token. Exact match against
+# scope['path'], never a prefix test: startswith('/health') would also exempt
+# /healthz, /health-debug and anything else someone adds later under that stem.
+# This is a closed list of one entry, not a namespace.
+_AUTH_EXEMPT_PATHS = frozenset({"/health"})
 
 mcp = FastMCP(
     name="nats",
@@ -427,12 +433,37 @@ async def get_health(js_enabled_only: bool = False, js_server_only: bool = False
     return await _get("/healthz", params=params or None)
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def liveness(_request: Request) -> JSONResponse:
+    """Liveness probe for the container HEALTHCHECK. Unauthenticated by design.
+
+    Distinct from the ``get_health`` *tool*, which queries the NATS ``/healthz``
+    endpoint. This is the reverse direction: it answers for *this process* and
+    deliberately does not touch NATS at all.
+
+    That is the whole design. A readiness-style probe that reached upstream would
+    mark this container unhealthy whenever NATS restarted, and compose would then
+    restart a process that was working perfectly — trading a NATS blip for a
+    nats-mcp outage. This server is stateless and reconnects per request, so it
+    needs no restart to recover. If a readiness signal is ever wanted, add a
+    separate ``/ready``; do not overload liveness with a dependency check.
+
+    Unauthenticated means the body is public. It carries a literal status and
+    nothing else: no version, no bind address, no ``NATS_MONITOR_URL``. This is the
+    one route on the server that answers without a token, so anything echoed here
+    is echoed to anyone on forge-net.
+    """
+    return JSONResponse({"status": "ok"})
+
+
 class _BearerAuthMiddleware:
     """ASGI middleware that enforces static bearer token authentication.
 
     Only active when NATS_MCP_API_TOKEN is set in the environment.
     Requests missing a valid Authorization header receive a 401 response.
-    Non-HTTP scopes (lifespan, websocket) are passed through unconditionally.
+    Non-HTTP scopes (lifespan, websocket) are passed through unconditionally,
+    as are the paths in _AUTH_EXEMPT_PATHS — currently /health alone, which the
+    container HEALTHCHECK calls before it could possibly hold a token.
     """
 
     def __init__(self, app: ASGIApp, token: str) -> None:
@@ -440,7 +471,7 @@ class _BearerAuthMiddleware:
         self._token = token
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
+        if scope["type"] == "http" and scope.get("path") not in _AUTH_EXEMPT_PATHS:
             request = Request(scope, receive)
             auth_header = request.headers.get("authorization", "")
             provided = (
