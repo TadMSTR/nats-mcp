@@ -50,6 +50,13 @@ LICENSE               MIT
 - Response sizes are capped before returning to the MCP caller.
 - No shell exec, subprocess calls, or filesystem writes. A log file is written only when
   `LOG_FILE` is explicitly set.
+- **HTTP transport is fail-closed and must stay that way.** `main()` raises rather than
+  starts when the token is missing or under 16 chars, or when the bind is non-loopback
+  without `NATS_MCP_ALLOW_NONLOOPBACK`. Do not downgrade any of these to a warning — that
+  was the pre-v0.2.0 behaviour and it is audit finding MEDIUM-1 (2026-08-30). A log line is
+  not an access control: nothing observes it unless someone is already tailing startup
+  output, and the process serves every tool in the meantime. Fleet pattern, matching
+  backrest-mcp and scoped-mcp. stdio mode is exempt — it has no network surface.
 - `get_connections` discloses client IP addresses and `authorized_user` (an agent identity)
   to any caller holding the tool grant. That is deliberate — it is what makes an
   authorization-violation burst attributable — and it is why the containerised deploy's
@@ -70,8 +77,9 @@ LICENSE               MIT
 |-----|---------|---------|
 | `NATS_MONITOR_URL` | `http://localhost:8222` | NATS HTTP monitoring base URL |
 | `NATS_MCP_PORT` | (unset) | Set → streamable-http transport. Unset → stdio |
-| `NATS_MCP_HOST` | `127.0.0.1` | HTTP bind address; `0.0.0.0` in a container |
-| `NATS_MCP_API_TOKEN` | (unset) | Bearer token, HTTP transport only |
+| `NATS_MCP_HOST` | `127.0.0.1` | HTTP bind address; `0.0.0.0` in a container (needs the opt-in below) |
+| `NATS_MCP_ALLOW_NONLOOPBACK` | (unset) | `1`/`true`/`yes` to permit a non-loopback bind |
+| `NATS_MCP_API_TOKEN` | (unset) | Bearer token, min 16 chars. **Required** in HTTP mode |
 | `LOG_LEVEL` | `INFO` | structlog level |
 | `LOG_FILE` | (unset) | Extra file sink; unset = stdout only |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | OTLP gRPC endpoint — port 4317, not 4318 |

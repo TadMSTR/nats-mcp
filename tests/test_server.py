@@ -869,49 +869,127 @@ def test_main_defaults_to_stdio(monkeypatch):
     assert calls == [((), {})]
 
 
+def _stub_run(monkeypatch, server):
+    """Capture mcp.run kwargs and neutralise atexit."""
+    calls = []
+    monkeypatch.setattr(server.mcp, "run", lambda *a, **k: calls.append(k))
+    monkeypatch.setattr(server, "atexit", type("A", (), {"register": staticmethod(lambda f: None)}))
+    return calls
+
+
+_GOOD_TOKEN = "x" * 32
+
+
 def test_main_http_binds_loopback_by_default(monkeypatch):
     from nats_mcp import server
 
     monkeypatch.setenv("NATS_MCP_PORT", "8508")
     monkeypatch.delenv("NATS_MCP_HOST", raising=False)
-    monkeypatch.delenv("NATS_MCP_API_TOKEN", raising=False)
-    calls = []
-    monkeypatch.setattr(server.mcp, "run", lambda *a, **k: calls.append(k))
-    monkeypatch.setattr(server, "atexit", type("A", (), {"register": staticmethod(lambda f: None)}))
+    monkeypatch.delenv("NATS_MCP_ALLOW_NONLOOPBACK", raising=False)
+    monkeypatch.setenv("NATS_MCP_API_TOKEN", _GOOD_TOKEN)
+    calls = _stub_run(monkeypatch, server)
     server.main()
     assert calls[0]["host"] == "127.0.0.1"
     assert calls[0]["port"] == 8508
     assert calls[0]["transport"] == "streamable-http"
-    # No token set — must run unauthenticated with no middleware, and the warning
-    # in main() is the only thing flagging it.
-    assert calls[0]["middleware"] is None
+    # Auth is no longer conditional — HTTP mode always carries the middleware,
+    # because it cannot start without a token at all.
+    assert len(calls[0]["middleware"]) == 1
 
 
-def test_main_http_honours_nats_mcp_host(monkeypatch):
-    """Build 2 cannot work without this — 127.0.0.1 inside a container binds the
-    container's own loopback and is unreachable from forge-net."""
+def test_main_http_refuses_without_a_token(monkeypatch):
+    """The MEDIUM-1 case: no token must refuse, not warn and serve.
+
+    A log line is not an access control — nothing observes it unless someone is
+    already tailing startup output, and the process serves every tool meanwhile.
+    """
     from nats_mcp import server
 
     monkeypatch.setenv("NATS_MCP_PORT", "8508")
-    monkeypatch.setenv("NATS_MCP_HOST", "0.0.0.0")
-    calls = []
-    monkeypatch.setattr(server.mcp, "run", lambda *a, **k: calls.append(k))
-    monkeypatch.setattr(server, "atexit", type("A", (), {"register": staticmethod(lambda f: None)}))
-    server.main()
-    assert calls[0]["host"] == "0.0.0.0"
+    monkeypatch.delenv("NATS_MCP_API_TOKEN", raising=False)
+    calls = _stub_run(monkeypatch, server)
+    with pytest.raises(RuntimeError, match="without NATS_MCP_API_TOKEN"):
+        server.main()
+    assert not calls, "server started despite refusing"
 
 
-def test_main_http_with_token_attaches_middleware(monkeypatch):
+def test_main_http_refuses_a_short_token(monkeypatch):
     from nats_mcp import server
 
     monkeypatch.setenv("NATS_MCP_PORT", "8508")
     monkeypatch.setenv("NATS_MCP_API_TOKEN", "s3cret")
-    calls = []
-    monkeypatch.setattr(server.mcp, "run", lambda *a, **k: calls.append(k))
-    monkeypatch.setattr(server, "atexit", type("A", (), {"register": staticmethod(lambda f: None)}))
+    calls = _stub_run(monkeypatch, server)
+    with pytest.raises(RuntimeError, match="too short"):
+        server.main()
+    assert not calls
+
+
+def test_main_http_refuses_nonloopback_without_optin(monkeypatch):
+    """0.0.0.0 must be an explicit, auditable opt-in — not a side effect of one env var."""
+    from nats_mcp import server
+
+    monkeypatch.setenv("NATS_MCP_PORT", "8508")
+    monkeypatch.setenv("NATS_MCP_HOST", "0.0.0.0")
+    monkeypatch.setenv("NATS_MCP_API_TOKEN", _GOOD_TOKEN)
+    monkeypatch.delenv("NATS_MCP_ALLOW_NONLOOPBACK", raising=False)
+    calls = _stub_run(monkeypatch, server)
+    with pytest.raises(RuntimeError, match="non-loopback"):
+        server.main()
+    assert not calls
+
+
+@pytest.mark.parametrize("optin", ["1", "true", "TRUE", "yes"])
+def test_main_http_allows_nonloopback_with_optin(optin, monkeypatch):
+    """Build 2's configuration: 0.0.0.0 + explicit opt-in + a real token."""
+    from nats_mcp import server
+
+    monkeypatch.setenv("NATS_MCP_PORT", "8508")
+    monkeypatch.setenv("NATS_MCP_HOST", "0.0.0.0")
+    monkeypatch.setenv("NATS_MCP_ALLOW_NONLOOPBACK", optin)
+    monkeypatch.setenv("NATS_MCP_API_TOKEN", _GOOD_TOKEN)
+    calls = _stub_run(monkeypatch, server)
     server.main()
-    assert calls[0]["middleware"] is not None
+    assert calls[0]["host"] == "0.0.0.0"
     assert len(calls[0]["middleware"]) == 1
+
+
+@pytest.mark.parametrize("optin", ["0", "false", "no", "", "maybe"])
+def test_nonloopback_optin_rejects_non_truthy_values(optin, monkeypatch):
+    """A typo'd opt-in must fail closed, not fall through to permitted."""
+    from nats_mcp import server
+
+    monkeypatch.setenv("NATS_MCP_PORT", "8508")
+    monkeypatch.setenv("NATS_MCP_HOST", "0.0.0.0")
+    monkeypatch.setenv("NATS_MCP_ALLOW_NONLOOPBACK", optin)
+    monkeypatch.setenv("NATS_MCP_API_TOKEN", _GOOD_TOKEN)
+    _stub_run(monkeypatch, server)
+    with pytest.raises(RuntimeError, match="non-loopback"):
+        server.main()
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+def test_loopback_hosts_need_no_optin(host, monkeypatch):
+    from nats_mcp import server
+
+    monkeypatch.setenv("NATS_MCP_PORT", "8508")
+    monkeypatch.setenv("NATS_MCP_HOST", host)
+    monkeypatch.delenv("NATS_MCP_ALLOW_NONLOOPBACK", raising=False)
+    monkeypatch.setenv("NATS_MCP_API_TOKEN", _GOOD_TOKEN)
+    calls = _stub_run(monkeypatch, server)
+    server.main()
+    assert calls[0]["host"] == host
+
+
+def test_stdio_mode_needs_no_token(monkeypatch):
+    """The guards are HTTP-only. stdio has no network surface and must stay unchanged."""
+    from nats_mcp import server
+
+    monkeypatch.delenv("NATS_MCP_PORT", raising=False)
+    monkeypatch.delenv("NATS_MCP_API_TOKEN", raising=False)
+    monkeypatch.setenv("NATS_MCP_HOST", "0.0.0.0")  # ignored without a port
+    calls = _stub_run(monkeypatch, server)
+    server.main()
+    assert calls == [{}]
 
 
 def test_main_logs_when_otel_enabled(monkeypatch):

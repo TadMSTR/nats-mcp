@@ -18,7 +18,8 @@ Configuration:
   NATS_MONITOR_URL — NATS HTTP monitoring base URL (default: http://localhost:8222)
   NATS_MCP_PORT    — set to serve streamable-http instead of stdio
   NATS_MCP_HOST    — HTTP bind address (default: 127.0.0.1)
-  NATS_MCP_API_TOKEN — bearer token, HTTP transport only
+  NATS_MCP_API_TOKEN — bearer token, HTTP transport only. REQUIRED in HTTP mode.
+  NATS_MCP_ALLOW_NONLOOPBACK — opt in to a non-loopback bind
 """
 
 from __future__ import annotations
@@ -55,6 +56,15 @@ _MAX_CONNECTIONS_LIMIT = 500
 # /connz accepts exactly these three states. A caller-supplied value is validated
 # against this set before it reaches the query string — never interpolated raw.
 _CONNZ_STATES = frozenset({"open", "closed", "all"})
+
+# HTTP transport adds a network surface stdio never had, and the tools behind it
+# return client IP addresses and agent identities. Fail closed: a bearer token is
+# mandatory, and a non-loopback bind needs an explicit opt-in. Matches the fleet
+# pattern in backrest-mcp and scoped-mcp; searxng-mcp's 2026-08-19 containerise is
+# on record as the counter-example, where optional off-by-default auth removed the
+# only access control the moment it moved into a container.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_MIN_API_TOKEN_LENGTH = 16
 
 mcp = FastMCP(
     name="nats",
@@ -466,22 +476,42 @@ def main() -> None:
     if port_env:
         port = int(port_env)
         api_token = os.environ.get("NATS_MCP_API_TOKEN")
-        middleware: list[Any] = []
-        if api_token:
-            _log.info("nats_mcp_bearer_auth_enabled")
-            middleware = [Middleware(_BearerAuthMiddleware, token=api_token)]
-        else:
-            _log.warning(
-                "nats_mcp_bearer_auth_disabled",
-                reason="NATS_MCP_API_TOKEN not set — HTTP transport running without authentication",
-            )
         # Default stays loopback so the stdio/PM2 path is unchanged. A container
         # needs 0.0.0.0: inside a network namespace the bind address is not the
         # security control — the compose `ports:` publish is — and binding the
         # container's own loopback makes the server unreachable from forge-net.
+        # That is exactly why it must be opted into rather than merely warned about.
         host = os.environ.get("NATS_MCP_HOST", "127.0.0.1")
+        allow_nonloopback = os.environ.get("NATS_MCP_ALLOW_NONLOOPBACK", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
+        # These three refuse rather than warn. A log line is not an access control:
+        # nothing sees it unless someone is already tailing startup output, and the
+        # process serves every tool in the meantime (audit 2026-08-30, MEDIUM-1).
+        if host not in _LOOPBACK_HOSTS and not allow_nonloopback:
+            raise RuntimeError(
+                f"Refusing to bind nats-mcp HTTP transport to non-loopback host {host!r}. "
+                "Set NATS_MCP_ALLOW_NONLOOPBACK=1 to override."
+            )
+        if not api_token:
+            raise RuntimeError(
+                "Refusing to start nats-mcp HTTP transport without NATS_MCP_API_TOKEN set. "
+                "These tools return client IP addresses and authorized_user identities; "
+                "HTTP mode must not run with an unauthenticated, reachable port."
+            )
+        if len(api_token) < _MIN_API_TOKEN_LENGTH:
+            raise RuntimeError(
+                f"NATS_MCP_API_TOKEN is too short ({len(api_token)} chars, need "
+                f">= {_MIN_API_TOKEN_LENGTH}). "
+                'Generate one with: python3 -c "import secrets; print(secrets.token_hex(32))"'
+            )
+
+        middleware: list[Any] = [Middleware(_BearerAuthMiddleware, token=api_token)]
         _log.info("nats_mcp_http_transport", host=host, port=port)
-        mcp.run(transport="streamable-http", host=host, port=port, middleware=middleware or None)
+        mcp.run(transport="streamable-http", host=host, port=port, middleware=middleware)
     else:
         mcp.run()  # stdio — current default mode
 

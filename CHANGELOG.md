@@ -22,6 +22,7 @@ cut as a release — the repo had no tags before this one.
   `/healthz?js-enabled-only=` and `?js-server-only=`.
 - **`NATS_MCP_HOST`** (default `127.0.0.1`) — HTTP bind address. `main()` previously
   hardcoded loopback, which is unreachable from a Docker network.
+- **`NATS_MCP_ALLOW_NONLOOPBACK`** — explicit opt-in required for a non-loopback bind.
 - **`nats_mcp/exceptions.py`** — `NatsMcpError` and the `NatsUnreachableError` /
   `NatsTimeoutError` / `NatsMonitoringError` subclasses.
 - **OTEL is now actually wired.** A counter (`nats_mcp.tool.calls`) and a duration
@@ -58,6 +59,17 @@ cut as a release — the repo had no tags before this one.
 - README's HTTP example port is **8508**, not 8494. Port 8494 belongs to
   `memsearch-summarize` in the services registry — the documented command failed on
   bind.
+
+### Security
+
+- **HTTP transport is now fail-closed.** It previously started and served every tool with
+  no authentication when `NATS_MCP_API_TOKEN` was unset, emitting a single
+  `nats_mcp_bearer_auth_disabled` warning — which nothing observes unless an operator is
+  already tailing startup output. `main()` now raises when the token is missing or shorter
+  than 16 characters, and when `NATS_MCP_HOST` is non-loopback without
+  `NATS_MCP_ALLOW_NONLOOPBACK=1`. Matches backrest-mcp and scoped-mcp; the tools behind
+  this port return client IP addresses and agent identities. Audit finding MEDIUM-1,
+  2026-08-30. **stdio mode is unaffected** and still needs no token.
 
 ### Fixed
 

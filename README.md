@@ -64,8 +64,9 @@ get_connections(state="closed", limit=50)
 |----------|---------|----------|---------|
 | `NATS_MONITOR_URL` | `http://localhost:8222` | No | NATS HTTP monitoring endpoint |
 | `NATS_MCP_PORT` | (none) | No | Set to enable HTTP transport on `127.0.0.1:<port>`. Unset = stdio (default). |
-| `NATS_MCP_API_TOKEN` | (none) | No | Bearer token for HTTP mode authentication. Uses `hmac.compare_digest()`. Only active when `NATS_MCP_PORT` is also set. |
-| `NATS_MCP_HOST` | `127.0.0.1` | No | HTTP bind address. Set `0.0.0.0` in a container. Only used when `NATS_MCP_PORT` is set. |
+| `NATS_MCP_API_TOKEN` | (none) | **Yes in HTTP mode** | Bearer token, min 16 chars. Uses `hmac.compare_digest()`. HTTP mode **refuses to start** without it. Unused in stdio mode. |
+| `NATS_MCP_HOST` | `127.0.0.1` | No | HTTP bind address. Set `0.0.0.0` in a container — also requires `NATS_MCP_ALLOW_NONLOOPBACK=1`. Only used when `NATS_MCP_PORT` is set. |
+| `NATS_MCP_ALLOW_NONLOOPBACK` | (none) | No | Set `1`/`true`/`yes` to permit a non-loopback bind. Any other value, including a typo, fails closed. |
 | `LOG_LEVEL` | `INFO` | No | structlog log level |
 | `LOG_FILE` | (none) | No | Extra file sink. Unset = stdout only; no file and no directory are created. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | (none) | No | OTLP **gRPC** endpoint (port 4317, not 4318). Enables traces and metrics. |
@@ -74,9 +75,29 @@ get_connections(state="closed", limit=50)
 
 **Stdio (default)** — when `NATS_MCP_PORT` is not set, the server runs in stdio mode for direct Claude Code / scoped-mcp subprocess usage.
 
-**HTTP (streamable-http)** — when `NATS_MCP_PORT` is set, the server serves MCP over streamable-http on `NATS_MCP_HOST:<port>`, defaulting to `127.0.0.1`. If `NATS_MCP_API_TOKEN` is also set, all HTTP requests must include `Authorization: Bearer <token>`. A warning is logged if HTTP mode runs without a token.
+**HTTP (streamable-http)** — when `NATS_MCP_PORT` is set, the server serves MCP over streamable-http on `NATS_MCP_HOST:<port>`, defaulting to `127.0.0.1`. All requests must carry `Authorization: Bearer <token>`.
 
-Inside a container set `NATS_MCP_HOST=0.0.0.0`: binding the container's own loopback makes the server unreachable from the Docker network. The bind address is not the security control in a network namespace — the compose `ports:` publish is, and the bearer token is.
+HTTP mode is **fail-closed**. It refuses to start — `RuntimeError`, not a log line — when:
+
+| Condition | Why |
+|---|---|
+| `NATS_MCP_API_TOKEN` unset | These tools return client IP addresses and `authorized_user` identities. A reachable unauthenticated port is not an acceptable default. |
+| `NATS_MCP_API_TOKEN` shorter than 16 chars | `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| `NATS_MCP_HOST` non-loopback without `NATS_MCP_ALLOW_NONLOOPBACK=1` | Widening the bind should be a deliberate, auditable choice, not a side effect of setting one variable. |
+
+Loopback values needing no opt-in: `127.0.0.1`, `localhost`, `::1`.
+
+Inside a container you need **both** `NATS_MCP_HOST=0.0.0.0` and `NATS_MCP_ALLOW_NONLOOPBACK=1`, plus a token — binding the container's own loopback makes the server unreachable from the Docker network. The bind address is not the security control in a network namespace; the compose `ports:` publish and the bearer token are.
+
+```bash
+NATS_MCP_PORT=8508 \
+NATS_MCP_HOST=0.0.0.0 \
+NATS_MCP_ALLOW_NONLOOPBACK=1 \
+NATS_MCP_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" \
+python -m nats_mcp.server
+```
+
+**stdio mode is unaffected** — it has no network surface and needs no token.
 
 ## Observability
 
@@ -108,7 +129,7 @@ pip install -e .
 python -m nats_mcp.server
 
 # HTTP mode with bearer auth
-NATS_MCP_PORT=8508 NATS_MCP_API_TOKEN=your-token python -m nats_mcp.server
+NATS_MCP_PORT=8508 NATS_MCP_API_TOKEN=<32+ hex chars> python -m nats_mcp.server
 
 # Via PM2
 pm2 start ecosystem.config.js
