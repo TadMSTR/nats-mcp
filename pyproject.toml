@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nats-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "FastMCP server for NATS messaging bus health via the HTTP monitoring API"
 readme = "README.md"
 license = "MIT"
@@ -50,10 +50,12 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.coverage.run]
 source = ["nats_mcp"]
-# observability.py (OTEL/structlog setup) and __main__ are boilerplate/entry-point code —
-# excluded from the unit-coverage gate; they need a live-transport harness for low value
-# (same rationale as scoped-mcp's serve-loop exclusion).
-omit = ["tests/*", "nats_mcp/__main__.py", "nats_mcp/observability.py"]
+# observability.py is IN the gate as of v0.2.0. It was omitted, so the log-sink
+# behaviour — which sink, which logger, whether a file is created — was never
+# measured at all, and that behaviour is load-bearing for the containerised
+# deploy. Only __main__.py stays out: it is a two-line entry point that calls
+# main() at import time and needs a live transport to exercise.
+omit = ["tests/*", "nats_mcp/__main__.py"]
 
 [tool.coverage.report]
 fail_under = 80
