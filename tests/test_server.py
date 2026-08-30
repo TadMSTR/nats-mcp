@@ -1055,3 +1055,139 @@ async def test_get_server_stats_with_real_varz_shape():
     assert result["version"] == "2.12.6"
     assert result["subscriptions"] == 66
     assert "server_id" not in result
+
+
+# ---------------------------------------------------------------------------
+# /health liveness route and its auth exemption
+# ---------------------------------------------------------------------------
+#
+# These are split deliberately. The unit tests below pin the middleware's
+# exemption rule and the route's body independently, but either could pass while
+# the route was never registered on the app at all — so the end-to-end test drives
+# the real ASGI app built by http_app(), which is the only thing that proves the
+# container HEALTHCHECK will actually get a 200.
+
+
+def _run_middleware(path: str, headers: list[tuple[bytes, bytes]]):
+    """Drive _BearerAuthMiddleware once; return (app_called, status_or_None)."""
+    import asyncio
+
+    from nats_mcp.server import _BearerAuthMiddleware
+
+    seen: list = []
+
+    async def fake_app(scope, receive, send):
+        seen.append("app_called")
+
+    async def capture_send(message):
+        seen.append(message)
+
+    middleware = _BearerAuthMiddleware(fake_app, token="secret-token")
+
+    async def run():
+        await middleware(
+            {
+                "type": "http",
+                "headers": headers,
+                "method": "GET",
+                "path": path,
+                "query_string": b"",
+            },
+            None,
+            capture_send,
+        )
+
+    asyncio.run(run())
+    start = next(
+        (m for m in seen if isinstance(m, dict) and m.get("type") == "http.response.start"), None
+    )
+    return "app_called" in seen, (start["status"] if start else None)
+
+
+def test_health_is_exempt_from_bearer_auth():
+    """/health passes through with no Authorization header at all."""
+    called, status = _run_middleware("/health", headers=[])
+    assert called, "/health must answer without a token — the HEALTHCHECK has none"
+    assert status is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/healthz", "/health/", "/health-debug", "/health/../mcp", "/HEALTH", "/mcp", "/"],
+)
+def test_only_the_exact_health_path_is_exempt(path):
+    """Near-miss paths still 401.
+
+    This is the assertion that distinguishes an exact match from
+    ``path.startswith("/health")``, which would hand /healthz and /health-debug an
+    unauthenticated pass. A prefix implementation passes every other test in this
+    file and fails only here.
+    """
+    called, status = _run_middleware(path, headers=[])
+    assert not called, f"{path} must not be exempt from auth"
+    assert status == 401
+
+
+def test_health_exemption_does_not_weaken_a_wrong_token_on_mcp():
+    """The exemption is path-scoped, not a general loosening of the token check."""
+    called, status = _run_middleware("/mcp", headers=[(b"authorization", b"Bearer wrong")])
+    assert not called
+    assert status == 401
+
+
+@pytest.mark.asyncio
+async def test_liveness_returns_ok_and_nothing_else():
+    """The body is public, so it must carry a status and no configuration."""
+    import json
+
+    from nats_mcp.server import liveness
+
+    response = await liveness(None)
+    assert response.status_code == 200
+    body = json.loads(response.body)
+    # Exact equality, not a subset check: a subset check would still pass if
+    # someone added the bind address or NATS_MONITOR_URL to an unauthenticated route.
+    assert body == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_liveness_does_not_probe_nats():
+    """Liveness is not readiness.
+
+    If this probed NATS, a NATS restart would mark the container unhealthy and
+    compose would restart a nats-mcp process that was working fine — trading a
+    NATS blip for a nats-mcp outage. respx has no routes registered here, so any
+    outbound call would raise rather than silently succeed.
+    """
+    from nats_mcp.server import liveness
+
+    await liveness(None)
+    assert len(respx.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_health_answers_200_on_the_real_app_behind_the_middleware():
+    """End-to-end: the route is registered AND exempt on the app main() builds.
+
+    Drives the same http_app + _BearerAuthMiddleware combination as main(). Without
+    this, the route could be missing entirely and the two unit tests above would
+    still both pass.
+    """
+    import httpx
+    from starlette.middleware import Middleware
+
+    from nats_mcp.server import _BearerAuthMiddleware, mcp
+
+    app = mcp.http_app(middleware=[Middleware(_BearerAuthMiddleware, token="secret-token")])
+    transport = httpx.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            health = await client.get("/health")
+            # And the negative half: /mcp on the SAME app still refuses. A test that
+            # only checked /health could not tell an exemption from a disabled guard.
+            mcp_unauth = await client.post("/mcp", json={})
+
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
+    assert mcp_unauth.status_code == 401

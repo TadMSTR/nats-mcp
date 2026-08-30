@@ -99,6 +99,25 @@ python -m nats_mcp.server
 
 **stdio mode is unaffected** — it has no network surface and needs no token.
 
+#### HTTP routes
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `/mcp` | **Bearer token required** | The MCP endpoint. Every request, no exceptions. |
+| `/health` | **None** | Liveness probe for the container `HEALTHCHECK`. |
+
+`/health` is the one route that answers without a token, and it is exempted by **exact
+path match** — `/healthz`, `/health/` and `/health-debug` all still return 401. Its body is
+the literal `{"status": "ok"}` and must stay that way: anything echoed from an
+unauthenticated route is echoed to everything else on the Docker network.
+
+It is a **liveness** check, not readiness. It deliberately does not probe NATS. If it did,
+a NATS restart would mark the container unhealthy and Docker would restart a nats-mcp
+process that was working fine — trading a NATS blip for a nats-mcp outage. The server is
+stateless and reconnects per request, so it needs no restart to recover.
+
+Note this is distinct from the `get_health` **tool**, which does query NATS `/healthz`.
+
 ## Observability
 
 Logs are JSON on **stdout**. Set `LOG_FILE` to also write a file; leave it unset (the default) and no file or directory is created. Rotation is the deployment layer's job — under Docker use the `json-file` driver with `max-size`/`max-file`.
@@ -134,6 +153,58 @@ NATS_MCP_PORT=8508 NATS_MCP_API_TOKEN=<32+ hex chars> python -m nats_mcp.server
 # Via PM2
 pm2 start ecosystem.config.js
 ```
+
+## Docker
+
+The container image is the deployment path on forge; the PM2 and stdio paths above remain
+supported and are unchanged.
+
+```bash
+docker pull ghcr.io/tadmstr/nats-mcp:v0.3.0
+# or build locally
+docker build -t nats-mcp:dev .
+```
+
+The image bakes `NATS_MCP_HOST=0.0.0.0`, `NATS_MCP_ALLOW_NONLOOPBACK=1` and
+`NATS_MCP_PORT=8508`. It deliberately does **not** bake `NATS_MONITOR_URL` (a `localhost`
+default would point at the container's own loopback, where nothing is listening) or
+`NATS_MCP_API_TOKEN` (never bake a credential into a layer). Both must be supplied.
+
+```bash
+docker run -d --name nats-mcp --network forge-net \
+  -p 127.0.0.1:8508:8508 \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  -e NATS_MONITOR_URL=http://nats:8222 \
+  -e NATS_MCP_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" \
+  ghcr.io/tadmstr/nats-mcp:v0.3.0
+```
+
+`--read-only` needs no companion `tmpfs`: logs go to stdout and the server writes nothing.
+
+**`NATS_MONITOR_URL` must be the NATS service name on the Docker network**, not
+`localhost`. Pointed at `localhost` the container still starts, still reports `healthy`,
+and still answers `/health` with 200 — while every tool fails. A healthcheck that does not
+cross the boundary cannot detect a broken boundary, so verify with a real tool call:
+
+```bash
+docker inspect --format '{{.State.Health.Status}}' nats-mcp   # necessary, not sufficient
+```
+
+### Deploying into the `nats` stack on forge
+
+`deploy/docker-compose.nats-mcp.yml` holds the service block for the existing `nats`
+stack, which already reserves a slot for it. It is a **fragment, not a runnable stack** —
+`nats`, and the `forge-net` network it attaches to, are defined by the target file.
+
+1. Copy the `nats-mcp:` service block into `~/docker/nats/docker-compose.yml`. Take the
+   service only; the trailing `networks:` block is there for reference and is already
+   declared in that file.
+2. Add `NATS_MCP_TOKEN=<32 hex chars>` to `~/docker/nats/.env` (mode 600). Minimum 16
+   characters — the process refuses to start below that.
+
+The image must be pullable from the host: GHCR packages are **private on first push**, so
+either make the package public or `docker login ghcr.io` on the host, or
+`docker compose pull` fails with an auth error.
 
 ## Development
 

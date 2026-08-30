@@ -1,0 +1,88 @@
+# nats-mcp — compose service fragment for the `nats` stack.
+#
+# THIS IS NOT A RUNNABLE STACK. It is the service block to merge into
+# ~/docker/nats/docker-compose.yml, whose header already reserves this slot
+# ("nats-mcp is co-located here once vikunja#496 brings its repo up to standard").
+#
+# It lives in the repo rather than in ~/docker because developer has no write grant
+# there — /etc/forge/workspace-policy.yml gives developer
+# write_roots: [~/repos/gitea, ~/repos/personal], and ~/docker is sysadmin's alone.
+# Merging it is a sysadmin action; see README.md § Docker for the two steps.
+#
+# Everything below was verified live against the `nats` container on forge-net
+# before this file was written — read_only, cap_drop, no-new-privileges and the
+# healthcheck were all run as a real container, not asserted on paper.
+
+services:
+  nats-mcp:
+    image: ghcr.io/tadmstr/nats-mcp:v0.3.0 # pin the tag; :latest also exists
+    container_name: nats-mcp
+    depends_on:
+      - nats
+    restart: unless-stopped
+    user: "1000:1000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # No writable path is needed at all: logs go to stdout and there is no cache,
+    # no audit log, and no state. Verified by running the image with --read-only.
+    # If a future change needs a mount, something about the stdout-only logging
+    # from v0.2.0 has regressed — fix that rather than dropping this line.
+    read_only: true
+    ports:
+      # Loopback-only. THIS is the exposure control, not the bind address inside
+      # the container. Anything reaching this service from another host goes
+      # through SWAG, or it does not go.
+      - "127.0.0.1:8508:8508"
+    environment:
+      # Container-to-container by service name on forge-net. NOT localhost:8222 —
+      # that is this container's own loopback, where nothing is listening. The
+      # `nats` service publishes 127.0.0.1:8222 for HOST consumers only.
+      #
+      # This is the single most consequential line in the file. Pointed at
+      # localhost the container still starts, still reports HEALTHY, still answers
+      # /health with 200 — and every tool fails. That exact state is vikunja#462.
+      # It was reproduced deliberately as a negative control during this build.
+      - NATS_MONITOR_URL=http://nats:8222
+      # Both of the next two are also baked into the image, and are repeated here
+      # on purpose: this is the deploy-site declaration that the bind was widened
+      # deliberately. Removing them changes nothing while the image default holds;
+      # they exist so the choice is visible where someone reviews the stack.
+      - NATS_MCP_HOST=0.0.0.0
+      # Not redundant with the line above. As of v0.2.0 the process REFUSES to
+      # start on a non-loopback bind without this opt-in (audit MEDIUM-1).
+      - NATS_MCP_ALLOW_NONLOOPBACK=1
+      - NATS_MCP_PORT=8508
+      # MANDATORY, minimum 16 characters — the process refuses to start without a
+      # conforming token, so there is no silent unauthenticated mode to fall into.
+      # forge-net is an external bridge shared by most stacks on this host, so this
+      # token is the only thing between a co-tenant container and a tool surface
+      # that returns client IP addresses and authorized_user identities.
+      #
+      # Set NATS_MCP_TOKEN in ~/docker/nats/.env (already present, mode 600).
+      # Generate with: python3 -c "import secrets; print(secrets.token_hex(32))"
+      - NATS_MCP_API_TOKEN=${NATS_MCP_TOKEN}
+      - LOG_LEVEL=INFO
+      # LOG_FILE is deliberately absent and must stay absent — logs go to stdout,
+      # which is what makes read_only: true above viable.
+      #
+      # gRPC 4317, NOT HTTP 4318: observability.py imports the grpc OTLP exporter.
+      # And the service name, not localhost:4317 — same trap as NATS_MONITOR_URL.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector:4317
+    # With no app-side file handler, this block IS the log rotation mechanism.
+    # The `nats` stack carries none today — worth adding one to the `nats` service
+    # at the same time.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - forge-net
+
+# For reference only — the target stack already declares this. Do not duplicate it
+# when merging; take the service block above and nothing else.
+networks:
+  forge-net:
+    external: true
