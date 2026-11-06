@@ -434,6 +434,68 @@ def test_bearer_auth_middleware_allows_valid_token():
     assert called, "Request with valid token should be passed through"
 
 
+@pytest.mark.parametrize("scheme", ["bearer", "BEARER", "BeArEr"])
+def test_bearer_auth_middleware_scheme_is_case_insensitive(scheme):
+    """The scheme is matched case-insensitively, and stripped the same way."""
+    import asyncio
+
+    from nats_mcp.server import _BearerAuthMiddleware
+
+    called = []
+
+    async def fake_app(scope, receive, send):
+        called.append(True)
+
+    middleware = _BearerAuthMiddleware(fake_app, token="secret-token")
+
+    async def run():
+        scope = {
+            "type": "http",
+            "headers": [(b"authorization", f"{scheme} secret-token".encode())],
+            "method": "POST",
+            "path": "/mcp",
+            "query_string": b"",
+        }
+        await middleware(scope, None, lambda *a: asyncio.sleep(0))
+
+    asyncio.run(run())
+    assert called, f"{scheme!r} scheme with a valid token should be passed through"
+
+
+@pytest.mark.parametrize(
+    "header", [b"bearer wrong-token", b"Bearersecret-token", b"secret-token", b"Basic secret-token"]
+)
+def test_bearer_auth_middleware_rejects_bad_headers(header):
+    import asyncio
+
+    from nats_mcp.server import _BearerAuthMiddleware
+
+    responses = []
+
+    async def fake_app(scope, receive, send):
+        responses.append("app_called")
+
+    async def capture_send(message):
+        responses.append(message)
+
+    middleware = _BearerAuthMiddleware(fake_app, token="secret-token")
+
+    async def run():
+        scope = {
+            "type": "http",
+            "headers": [(b"authorization", header)],
+            "method": "POST",
+            "path": "/mcp",
+            "query_string": b"",
+        }
+        await middleware(scope, None, capture_send)
+
+    asyncio.run(run())
+    assert "app_called" not in responses
+    start = next(r for r in responses if r.get("type") == "http.response.start")
+    assert start["status"] == 401
+
+
 def test_bearer_auth_middleware_rejects_missing_token():
     """_BearerAuthMiddleware returns 401 when Authorization header is absent."""
     import asyncio

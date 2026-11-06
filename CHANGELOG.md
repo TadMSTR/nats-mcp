@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-11-06
+
+### Fixed
+
+- **Bearer scheme case.** `_BearerAuthMiddleware` checked the `Authorization` scheme
+  case-insensitively but stripped it with a case-sensitive `removeprefix("Bearer ")`, so
+  `bearer <token>` or `BEARER <token>` compared the whole header against the token and was
+  refused with a valid token. The scheme is now stripped by length after the
+  case-insensitive check (RFC 9110 §11.1). Tests cover `bearer`, `BEARER` and mixed case,
+  plus the rejections. (vikunja#669)
+
 ## [0.3.0] — 2026-08-30
 
 Containerisation. Produces a published image and the compose service fragment for

@@ -474,11 +474,10 @@ class _BearerAuthMiddleware:
         if scope["type"] == "http" and scope.get("path") not in _AUTH_EXEMPT_PATHS:
             request = Request(scope, receive)
             auth_header = request.headers.get("authorization", "")
-            provided = (
-                auth_header.removeprefix("Bearer ")
-                if auth_header.lower().startswith("bearer ")
-                else ""
-            )
+            # The auth scheme is case-insensitive (RFC 9110 §11.1), so the check is. The
+            # strip has to be too: removeprefix("Bearer ") left "bearer <token>" whole, and
+            # a client sending the lowercase scheme was refused with a valid token.
+            provided = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
             if not hmac.compare_digest(provided, self._token):
                 response = Response(
                     content='{"error":"Unauthorized"}',
